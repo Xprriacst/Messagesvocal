@@ -1,12 +1,12 @@
 # VoiceCast — MVP diffusion de messages vocaux
 
-MVP minimaliste : on uploade un CSV de contacts + un MP3, on lance la diffusion via l'API [Voice Partner](https://www.voicepartner.fr/api-voix/) qui dépose le message sur le répondeur de chaque destinataire.
+MVP : on uploade un CSV de contacts, on saisit un `tokenAudio` (récupéré sur Voice Partner après upload de votre MP3), on lance la diffusion. L'API Voice Partner dépose le message sur le répondeur de chaque destinataire.
 
 ## Stack
 
 - Next.js 15 (App Router) + Tailwind
 - TypeScript
-- API Voice Partner (variable d'env `VOICE_PARTNER_API_KEY`)
+- API Voice Partner (`POST /v1/campaign/send`)
 - Déploiement Netlify (`@netlify/plugin-nextjs`)
 
 ## Lancer en local
@@ -25,41 +25,49 @@ Ouvre `http://localhost:3000`.
 |---|---|---|
 | `VOICE_PARTNER_API_KEY` | oui | Clé API Voice Partner |
 | `VOICE_PARTNER_BASE_URL` | non | Override base URL (défaut `https://api.voicepartner.fr`) |
-| `VOICE_PARTNER_SENDER` | non | Nom expéditeur par défaut |
+| `VOICE_PARTNER_SENDER` | non | Numéro émetteur par défaut (format `334...`) |
 | `APP_PASSWORD` | non | Mot de passe simple pour protéger l'app. Vide = pas de gate. |
 
-## Format CSV attendu
+## Flux MVP
 
-Une colonne contenant les numéros de téléphone — l'app détecte automatiquement les en-têtes habituels : `phone`, `telephone`, `mobile`, `numero`, etc. Les numéros français au format `06...` sont automatiquement convertis en `+33...`. Optionnellement une colonne `name` / `nom`.
+1. **Préparer ton MP3** : connecte-toi sur ton dashboard Voice Partner, uploade ton message vocal dans la bibliothèque d'enregistrements et copie le `tokenAudio` correspondant.
+2. **Préparer ton CSV** : une colonne avec les numéros (en-têtes détectées automatiquement : `phone`, `telephone`, `mobile`, `numero`, etc.). Les `06...` sont convertis en `+33...`.
+3. **Lancer la campagne** depuis le dashboard de l'app : étape 1 CSV → étape 2 token + numéro émetteur → étape 3 diffusion.
 
-Exemple :
+Exemple CSV :
 ```csv
 name,phone
 Alice Martin,0612345678
 Bob Durand,+33612345679
 ```
 
+## Endpoint Voice Partner utilisé
+
+```
+POST https://api.voicepartner.fr/v1/campaign/send
+Content-Type: application/json
+
+{
+  "apiKey": "...",
+  "phoneNumbers": "+33612345678",
+  "sender": "334...",
+  "tokenAudio": "..."
+}
+```
+
+Toute la sérialisation est isolée dans `lib/voicepartner.ts` — facile à ajuster si besoin.
+
 ## Déploiement Netlify
 
 1. Push sur GitHub.
-2. Sur Netlify : New site from Git → sélectionne le repo.
-3. Plugin Next.js détecté automatiquement via `netlify.toml`.
+2. Netlify : New site from Git → sélectionne le repo.
+3. Le plugin Next.js est détecté via `netlify.toml`.
 4. Settings → Environment variables : ajoute `VOICE_PARTNER_API_KEY` (et `APP_PASSWORD` si tu veux protéger).
-
-## ⚠️ À valider avec ta doc Voice Partner
-
-Les noms exacts des endpoints / champs sont définis dans `lib/voicepartner.ts` :
-
-- `POST {baseUrl}/v1/media/upload` — upload du MP3, retour `mediaId`
-- `POST {baseUrl}/v1/voice/deposit` — dépôt du media sur un numéro
-
-Si ton compte Voice Partner expose des chemins différents (ex: `/api/v1/...`, ou un autre nom de champ : `phone` vs `phoneNumber`, `audio_id` vs `mediaId`), ajuste **uniquement** `lib/voicepartner.ts`. Toute la sérialisation est isolée à cet endroit.
-
-La doc officielle : https://www.docpartner.dev/api/voice-partner
 
 ## Limitations MVP
 
-- Pas de DB, pas d'historique de campagnes
-- Pas de SMS de relance
-- Pas de queue : la boucle d'envoi est synchrone (~1 seconde par numéro). Pour > 200 contacts envisager une file d'attente.
-- Auth = mot de passe partagé en clair via env (suffisant pour un MVP solo)
+- L'upload du MP3 passe par le dashboard Voice Partner (pas d'endpoint d'upload public dans la doc) — l'app prend un `tokenAudio` en input.
+- Pas de DB, pas d'historique de campagnes.
+- Pas de SMS de relance.
+- Boucle d'envoi synchrone (~1 s par numéro). Pour > 200 contacts envisager une queue.
+- Auth = mot de passe partagé via env var.
