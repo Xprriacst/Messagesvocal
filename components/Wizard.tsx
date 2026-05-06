@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { ContactRow, ParsedCsv } from "@/lib/csv";
 
 type Step = 1 | 2 | 3;
@@ -9,18 +9,24 @@ type SendSummary = {
   attempted: number;
   delivered: number;
   failed: number;
-  errors: Array<{ phone: string; error: string }>;
+  provider?: string;
+  raw?: unknown;
 };
 
 export default function Wizard() {
   const [step, setStep] = useState<Step>(1);
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [parsed, setParsed] = useState<ParsedCsv | null>(null);
-  const [tokenAudio, setTokenAudio] = useState("");
+  const [audioFile, setAudioFile] = useState<File | null>(null);
   const [sender, setSender] = useState("");
   const [sending, setSending] = useState(false);
   const [summary, setSummary] = useState<SendSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const audioUrl = useMemo(
+    () => (audioFile ? URL.createObjectURL(audioFile) : null),
+    [audioFile]
+  );
 
   async function handleCsv(file: File) {
     setError(null);
@@ -30,24 +36,43 @@ export default function Wizard() {
     setParsed(parseContactsCsv(text));
   }
 
+  function handleAudio(file: File) {
+    setError(null);
+    if (
+      !/audio\/(mpeg|mp3|wav|ogg)/i.test(file.type) &&
+      !/\.(mp3|wav|ogg)$/i.test(file.name)
+    ) {
+      setError("Format audio non supporté. Utilise un MP3.");
+      return;
+    }
+    setAudioFile(file);
+  }
+
   async function send() {
-    if (!parsed || !tokenAudio || parsed.contacts.length === 0) return;
+    if (!parsed || !audioFile || parsed.contacts.length === 0) return;
     setSending(true);
     setError(null);
     setSummary(null);
 
+    const form = new FormData();
+    form.append("audio", audioFile);
+    form.append(
+      "contacts",
+      JSON.stringify(
+        parsed.contacts.map((c: ContactRow) => ({ phone: c.phone, name: c.name }))
+      )
+    );
+    if (sender.trim()) form.append("sender", sender.trim());
+
     try {
-      const res = await fetch("/api/send-campaign", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contacts: parsed.contacts.map((c: ContactRow) => ({ phone: c.phone, name: c.name })),
-          tokenAudio: tokenAudio.trim(),
-          sender: sender.trim() || undefined
-        })
-      });
+      const res = await fetch("/api/send-campaign", { method: "POST", body: form });
       const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || `Erreur ${res.status}`);
+      if (!res.ok) {
+        const msg = data?.detail
+          ? `${data.error || "Erreur"} — ${data.detail}`
+          : data?.error || `Erreur ${res.status}`;
+        throw new Error(msg);
+      }
       setSummary(data as SendSummary);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Erreur inconnue");
@@ -60,7 +85,7 @@ export default function Wizard() {
     setStep(1);
     setCsvFile(null);
     setParsed(null);
-    setTokenAudio("");
+    setAudioFile(null);
     setSummary(null);
     setError(null);
   }
@@ -72,7 +97,7 @@ export default function Wizard() {
       {step === 1 && (
         <Card
           title="1. Importez votre liste de contacts"
-          subtitle="Un fichier CSV avec une colonne contenant les numéros de téléphone (ex: phone, telephone, mobile)."
+          subtitle="Un CSV avec une colonne contenant les numéros (ex: phone, telephone, mobile). Les 06... sont normalisés en +33..."
         >
           <FileDrop
             accept=".csv,text/csv"
@@ -126,52 +151,36 @@ export default function Wizard() {
 
       {step === 2 && (
         <Card
-          title="2. Message vocal & émetteur"
-          subtitle="Uploadez votre MP3 sur votre compte Voice Partner pour récupérer un token audio, puis collez-le ici."
+          title="2. Importez votre message vocal"
+          subtitle="MP3 de 5 à 30 secondes, voix claire. C'est ce qui sera déposé sur le répondeur de chaque contact."
         >
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-slate-700">
-                Token audio <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="text"
-                value={tokenAudio}
-                onChange={(e) => setTokenAudio(e.target.value)}
-                placeholder="Ex: aZ3dF9..."
-                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-mono focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
-              />
-              <p className="mt-1 text-xs text-slate-500">
-                Récupérable dans votre{" "}
-                <a
-                  href="https://www.voicepartner.fr/"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-brand-600 underline"
-                >
-                  espace Voice Partner
-                </a>
-                {" "}après upload du MP3 dans la bibliothèque d&apos;enregistrements.
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-slate-700">
-                Numéro émetteur (optionnel)
-              </label>
-              <input
-                type="text"
-                value={sender}
-                onChange={(e) => setSender(e.target.value)}
-                placeholder="Ex: 33412345678"
-                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-mono focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
-              />
-              <p className="mt-1 text-xs text-slate-500">
-                Numéro affiché au destinataire (format international sans &laquo; + &raquo;,
-                ex: <span className="font-mono">33412345678</span>). Laisser vide pour utiliser
-                celui par défaut configuré sur le serveur.
-              </p>
-            </div>
+          <FileDrop
+            accept="audio/mpeg,audio/mp3,.mp3"
+            label={audioFile ? audioFile.name : "Glissez votre MP3 ou cliquez pour choisir"}
+            onFile={handleAudio}
+          />
+          {audioUrl && (
+            <audio controls src={audioUrl} className="mt-4 w-full">
+              Votre navigateur ne supporte pas la lecture audio.
+            </audio>
+          )}
+          <div className="mt-4">
+            <label className="block text-sm font-medium text-slate-700">
+              Numéro émetteur (fixe FR)
+            </label>
+            <input
+              type="text"
+              value={sender}
+              onChange={(e) => setSender(e.target.value)}
+              placeholder="+33123456789"
+              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 font-mono text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+            />
+            <p className="mt-1 text-xs text-slate-500">
+              Numéro affiché au destinataire — il pourra te rappeler dessus. Doit être
+              un <strong>fixe FR</strong> que tu détiens (01/02/03/04/05/09).
+              Mobile interdit en envoi de masse (ARCEP). Laisser vide pour utiliser
+              celui par défaut côté serveur.
+            </p>
           </div>
           <Footer>
             <button className="btn-secondary" onClick={() => setStep(1)}>
@@ -179,7 +188,7 @@ export default function Wizard() {
             </button>
             <button
               className="btn-primary"
-              disabled={!tokenAudio.trim()}
+              disabled={!audioFile}
               onClick={() => setStep(3)}
             >
               Continuer
@@ -191,21 +200,22 @@ export default function Wizard() {
       {step === 3 && (
         <Card
           title="3. Lancer la campagne"
-          subtitle="Vérifiez et envoyez. Chaque contact reçoit votre message déposé sur son répondeur."
+          subtitle="Vérifiez puis envoyez. Chaque contact recevra votre message déposé directement sur son répondeur."
         >
           <ul className="space-y-2 text-sm">
             <li>
               📋 <strong>{parsed?.contacts.length ?? 0}</strong> contacts à appeler
             </li>
             <li>
-              🎙️ Token audio :{" "}
-              <span className="font-mono text-xs">
-                {tokenAudio.length > 16 ? `${tokenAudio.slice(0, 12)}…${tokenAudio.slice(-4)}` : tokenAudio}
-              </span>
+              🎙️ Audio : <strong>{audioFile?.name}</strong> (
+              {formatBytes(audioFile?.size ?? 0)})
             </li>
             <li>
-              📞 Émetteur :{" "}
-              <strong>{sender || "(par défaut serveur)"}</strong>
+              📞 Émetteur : <strong>{sender || "(par défaut serveur)"}</strong>
+            </li>
+            <li className="text-slate-500">
+              💰 Coût estimé : <strong>{((parsed?.contacts.length ?? 0) * 0.19).toFixed(2)} € HT</strong>{" "}
+              <span className="text-xs">(0,19 € HT/message AllMySMS)</span>
             </li>
           </ul>
 
@@ -217,26 +227,16 @@ export default function Wizard() {
 
           {summary && (
             <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
-              <div className="font-semibold">Campagne terminée</div>
+              <div className="font-semibold">Campagne envoyée à AllMySMS</div>
               <div className="mt-2 grid grid-cols-3 gap-2 text-center">
-                <Stat label="Tentatives" value={summary.attempted} />
-                <Stat label="Délivrés" value={summary.delivered} accent="emerald" />
+                <Stat label="Contacts" value={summary.attempted} />
+                <Stat label="Acceptés" value={summary.delivered} accent="emerald" />
                 <Stat label="Échecs" value={summary.failed} accent="red" />
               </div>
-              {summary.errors.length > 0 && (
-                <details className="mt-3">
-                  <summary className="cursor-pointer text-xs text-emerald-800">
-                    Voir les erreurs ({summary.errors.length})
-                  </summary>
-                  <ul className="mt-2 max-h-32 space-y-1 overflow-y-auto text-xs">
-                    {summary.errors.map((e, i) => (
-                      <li key={i} className="font-mono">
-                        {e.phone} — {e.error}
-                      </li>
-                    ))}
-                  </ul>
-                </details>
-              )}
+              <p className="mt-3 text-xs text-emerald-800">
+                Les statuts définitifs (numéro injoignable, répondeur indisponible…)
+                sont visibles dans ton dashboard AllMySMS.
+              </p>
             </div>
           )}
 
@@ -400,4 +400,11 @@ function Stat({
       <div className="text-[10px] uppercase tracking-wide text-slate-500">{label}</div>
     </div>
   );
+}
+
+function formatBytes(n: number): string {
+  if (!n) return "0 B";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
