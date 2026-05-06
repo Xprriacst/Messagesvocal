@@ -1,17 +1,23 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ContactRow, ParsedCsv } from "@/lib/csv";
 
 type Step = 1 | 2 | 3;
 
 type SendSummary = {
-  attempted: number;
-  delivered: number;
-  failed: number;
-  provider?: string;
-  raw?: unknown;
+  ok: boolean;
+  campaignId?: string;
+  code?: number;
+  description?: string;
+  nbContacts: number;
+  cost: number | null;
+  balance: number | null;
+  invalidNumbers?: string;
+  audioUrl?: string;
 };
+
+type Account = { balance: number; company?: string; email?: string };
 
 export default function Wizard() {
   const [step, setStep] = useState<Step>(1);
@@ -19,9 +25,19 @@ export default function Wizard() {
   const [parsed, setParsed] = useState<ParsedCsv | null>(null);
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [sender, setSender] = useState("");
+  const [campaignName, setCampaignName] = useState("");
+  const [simulate, setSimulate] = useState(false);
   const [sending, setSending] = useState(false);
   const [summary, setSummary] = useState<SendSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [account, setAccount] = useState<Account | null>(null);
+
+  useEffect(() => {
+    fetch("/api/account")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => data && setAccount(data))
+      .catch(() => undefined);
+  }, []);
 
   const audioUrl = useMemo(
     () => (audioFile ? URL.createObjectURL(audioFile) : null),
@@ -42,7 +58,11 @@ export default function Wizard() {
       !/audio\/(mpeg|mp3|wav|ogg)/i.test(file.type) &&
       !/\.(mp3|wav|ogg)$/i.test(file.name)
     ) {
-      setError("Format audio non supporté. Utilise un MP3.");
+      setError("Format audio non supporté. Utilise un MP3 ou WAV.");
+      return;
+    }
+    if (file.size < 1024 || file.size > 5 * 1024 * 1024) {
+      setError("Taille audio hors limites (1 Ko - 5 Mo).");
       return;
     }
     setAudioFile(file);
@@ -63,6 +83,8 @@ export default function Wizard() {
       )
     );
     if (sender.trim()) form.append("sender", sender.trim());
+    if (campaignName.trim()) form.append("campaignName", campaignName.trim());
+    if (simulate) form.append("simulate", "1");
 
     try {
       const res = await fetch("/api/send-campaign", { method: "POST", body: form });
@@ -88,11 +110,21 @@ export default function Wizard() {
     setAudioFile(null);
     setSummary(null);
     setError(null);
+    setSimulate(false);
   }
+
+  const estCost = (parsed?.contacts.length ?? 0) * 0.19;
 
   return (
     <div className="space-y-8">
-      <Steps current={step} />
+      <div className="flex items-center justify-between">
+        <Steps current={step} />
+        {account && (
+          <div className="text-xs text-slate-500">
+            Solde AllMySMS : <strong>{account.balance.toFixed(2)} €</strong>
+          </div>
+        )}
+      </div>
 
       {step === 1 && (
         <Card
@@ -152,10 +184,10 @@ export default function Wizard() {
       {step === 2 && (
         <Card
           title="2. Importez votre message vocal"
-          subtitle="MP3 de 5 à 30 secondes, voix claire. C'est ce qui sera déposé sur le répondeur de chaque contact."
+          subtitle="MP3 ou WAV de 5 à 30 secondes (1 Ko - 5 Mo). Déposé sur le répondeur de chaque contact."
         >
           <FileDrop
-            accept="audio/mpeg,audio/mp3,.mp3"
+            accept="audio/mpeg,audio/mp3,audio/wav,.mp3,.wav"
             label={audioFile ? audioFile.name : "Glissez votre MP3 ou cliquez pour choisir"}
             onFile={handleAudio}
           />
@@ -164,24 +196,40 @@ export default function Wizard() {
               Votre navigateur ne supporte pas la lecture audio.
             </audio>
           )}
-          <div className="mt-4">
-            <label className="block text-sm font-medium text-slate-700">
-              Numéro émetteur (fixe FR)
-            </label>
-            <input
-              type="text"
-              value={sender}
-              onChange={(e) => setSender(e.target.value)}
-              placeholder="+33123456789"
-              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 font-mono text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
-            />
-            <p className="mt-1 text-xs text-slate-500">
-              Numéro affiché au destinataire — il pourra te rappeler dessus. Doit être
-              un <strong>fixe FR</strong> que tu détiens (01/02/03/04/05/09).
-              Mobile interdit en envoi de masse (ARCEP). Laisser vide pour utiliser
-              celui par défaut côté serveur.
-            </p>
+
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            <div>
+              <label className="block text-sm font-medium text-slate-700">
+                Numéro émetteur (fixe FR)
+              </label>
+              <input
+                type="text"
+                value={sender}
+                onChange={(e) => setSender(e.target.value)}
+                placeholder="0123456789"
+                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 font-mono text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+              />
+              <p className="mt-1 text-xs text-slate-500">
+                Fixe FR (01/02/03/04/05/09). Mobile interdit en envoi de masse.
+              </p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-700">
+                Nom de campagne (optionnel)
+              </label>
+              <input
+                type="text"
+                value={campaignName}
+                onChange={(e) => setCampaignName(e.target.value)}
+                placeholder="Ex: Relance clients mai"
+                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+              />
+              <p className="mt-1 text-xs text-slate-500">
+                Visible dans ton dashboard AllMySMS.
+              </p>
+            </div>
           </div>
+
           <Footer>
             <button className="btn-secondary" onClick={() => setStep(1)}>
               Retour
@@ -200,24 +248,30 @@ export default function Wizard() {
       {step === 3 && (
         <Card
           title="3. Lancer la campagne"
-          subtitle="Vérifiez puis envoyez. Chaque contact recevra votre message déposé directement sur son répondeur."
+          subtitle="Vérifie et envoie. Active le mode simulation pour vérifier le coût sans débiter."
         >
           <ul className="space-y-2 text-sm">
-            <li>
-              📋 <strong>{parsed?.contacts.length ?? 0}</strong> contacts à appeler
-            </li>
-            <li>
-              🎙️ Audio : <strong>{audioFile?.name}</strong> (
-              {formatBytes(audioFile?.size ?? 0)})
-            </li>
-            <li>
-              📞 Émetteur : <strong>{sender || "(par défaut serveur)"}</strong>
-            </li>
+            <li>📋 <strong>{parsed?.contacts.length ?? 0}</strong> contacts à appeler</li>
+            <li>🎙️ Audio : <strong>{audioFile?.name}</strong> ({formatBytes(audioFile?.size ?? 0)})</li>
+            <li>📞 Émetteur : <strong>{sender || "(par défaut serveur)"}</strong></li>
+            {campaignName && <li>🏷️ Campagne : <strong>{campaignName}</strong></li>}
             <li className="text-slate-500">
-              💰 Coût estimé : <strong>{((parsed?.contacts.length ?? 0) * 0.19).toFixed(2)} € HT</strong>{" "}
-              <span className="text-xs">(0,19 € HT/message AllMySMS)</span>
+              💰 Coût estimé : <strong>{estCost.toFixed(2)} € HT</strong>{" "}
+              <span className="text-xs">(0,19 € HT/message)</span>
             </li>
           </ul>
+
+          <label className="mt-4 flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={simulate}
+              onChange={(e) => setSimulate(e.target.checked)}
+              className="h-4 w-4 rounded border-slate-300 text-brand-500 focus:ring-brand-500"
+            />
+            <span>
+              Mode simulation (vérifie les numéros et le coût sans envoyer ni débiter)
+            </span>
+          </label>
 
           {error && (
             <div className="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
@@ -227,15 +281,45 @@ export default function Wizard() {
 
           {summary && (
             <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
-              <div className="font-semibold">Campagne envoyée à AllMySMS</div>
-              <div className="mt-2 grid grid-cols-3 gap-2 text-center">
-                <Stat label="Contacts" value={summary.attempted} />
-                <Stat label="Acceptés" value={summary.delivered} accent="emerald" />
-                <Stat label="Échecs" value={summary.failed} accent="red" />
+              <div className="font-semibold">
+                {simulate ? "Simulation terminée" : "Campagne envoyée à AllMySMS"}
               </div>
+              <div className="mt-2 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <Stat label="Contacts" value={summary.nbContacts} />
+                <Stat
+                  label="Coût"
+                  value={summary.cost ?? 0}
+                  suffix=" €"
+                  accent="emerald"
+                />
+                <Stat
+                  label="Solde"
+                  value={summary.balance ?? 0}
+                  suffix=" €"
+                />
+                <Stat
+                  label="Invalides"
+                  value={summary.invalidNumbers ? summary.invalidNumbers.split("|").length : 0}
+                  accent={summary.invalidNumbers ? "red" : undefined}
+                />
+              </div>
+              {summary.campaignId && (
+                <div className="mt-3 text-xs">
+                  Campaign ID : <span className="font-mono">{summary.campaignId}</span>
+                </div>
+              )}
+              {summary.invalidNumbers && (
+                <details className="mt-2">
+                  <summary className="cursor-pointer text-xs">
+                    Numéros refusés
+                  </summary>
+                  <div className="mt-1 max-h-24 overflow-y-auto rounded bg-white/60 p-2 font-mono text-[11px]">
+                    {summary.invalidNumbers.split("|").join(", ")}
+                  </div>
+                </details>
+              )}
               <p className="mt-3 text-xs text-emerald-800">
-                Les statuts définitifs (numéro injoignable, répondeur indisponible…)
-                sont visibles dans ton dashboard AllMySMS.
+                Statuts définitifs visibles dans ton dashboard AllMySMS.
               </p>
             </div>
           )}
@@ -255,7 +339,11 @@ export default function Wizard() {
                   Retour
                 </button>
                 <button className="btn-primary" onClick={send} disabled={sending}>
-                  {sending ? "Envoi en cours..." : "Lancer la diffusion"}
+                  {sending
+                    ? "Envoi en cours..."
+                    : simulate
+                    ? "Simuler"
+                    : "Lancer la diffusion"}
                 </button>
               </>
             )}
@@ -382,11 +470,13 @@ function FileDrop({
 function Stat({
   label,
   value,
-  accent
+  accent,
+  suffix
 }: {
   label: string;
   value: number;
   accent?: "emerald" | "red";
+  suffix?: string;
 }) {
   const color =
     accent === "emerald"
@@ -394,9 +484,16 @@ function Stat({
       : accent === "red"
       ? "text-red-700"
       : "text-slate-700";
+  const display =
+    typeof value === "number" && !Number.isInteger(value)
+      ? value.toFixed(2)
+      : String(value);
   return (
-    <div className="rounded-md bg-white p-2">
-      <div className={`text-xl font-bold ${color}`}>{value}</div>
+    <div className="rounded-md bg-white p-2 text-center">
+      <div className={`text-xl font-bold ${color}`}>
+        {display}
+        {suffix}
+      </div>
       <div className="text-[10px] uppercase tracking-wide text-slate-500">{label}</div>
     </div>
   );

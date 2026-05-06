@@ -1,18 +1,17 @@
 /**
  * AllMySMS API client (Mailing Vocal Direct Répondeur).
  *
- * Doc référence : https://doc.allmysms.com/api/fr/
+ * Doc : https://doc.allmysms.com/api/fr/
  *
- * MVP : on encode le MP3 en base64 et on l'envoie inline avec la liste
- * des destinataires + le numéro émetteur (fixe FR).
- *
- * ⚠️ Les noms de champs / endpoint exacts dépendent de la version
- * de l'API. Toute la sérialisation est isolée ici — ajuste si la doc
- * PDF officielle utilise des noms différents (ex: `voiceFile` vs
- * `smsData.audio`, etc.).
+ * Endpoint utilisé : POST /voice/send/bulk
+ * - Auth : Basic base64(login:apiKey)
+ * - L'audio doit être servi via une URL publique (5-30s, 1Ko-5Mo, MP3/WAV)
+ * - Numéros destinataires : format "33612345678" (sans +)
+ * - Numéro émetteur (from) : numéro fixe FR national, ex "0123456789"
+ *   (préfixe 01/02/03/04/05/09 - mobile interdit en envoi de masse)
  */
 
-const DEFAULT_BASE_URL = "https://api.allmysms.com/http/9.0";
+const DEFAULT_BASE_URL = "https://api.allmysms.com";
 
 function getConfig() {
   const login = process.env.ALLMYSMS_LOGIN;
@@ -35,67 +34,113 @@ function authHeader(login: string, apiKey: string) {
   return `Basic ${creds}`;
 }
 
-export type MvrRecipient = {
-  phoneNumber: string; // format E.164, ex: +33612345678
+export type BulkVoiceResponse = {
+  code: number;
+  description: string;
+  invalidNumbers?: string;
+  campaignId?: string;
+  smsIds?: Array<{ smsId: string; phoneNumber: string }>;
+  nbContacts?: string | number;
+  cost?: number;
+  balance?: number;
 };
 
-export type MvrCampaignResult = {
+export type BulkVoiceResult = {
   ok: boolean;
   status: number;
-  raw: unknown;
+  data: BulkVoiceResponse | null;
+  raw: string;
 };
 
-/**
- * Envoie une campagne MVR (Mailing Vocal Direct Répondeur).
- *
- * Construction du payload :
- *  - `from`        : numéro émetteur (fixe FR au format international, ex "+33123456789")
- *  - `smsData`     : objet JSON décrivant la campagne
- *      - recipients      : liste {mobilePhone}
- *      - audioFileName   : nom du fichier
- *      - audioFileContent: contenu base64 du MP3
- */
-export async function sendMvrCampaign(args: {
-  audioBuffer: ArrayBuffer;
-  audioFilename: string;
-  recipients: MvrRecipient[];
-  sender?: string;
-}): Promise<MvrCampaignResult> {
-  const { login, apiKey, baseUrl, defaultSender } = getConfig();
-  const sender = args.sender || defaultSender;
-  if (!sender) {
-    throw new Error(
-      "Numéro émetteur manquant - fournis 'sender' ou configure ALLMYSMS_DEFAULT_SENDER"
-    );
-  }
+export async function sendBulkVoice(args: {
+  recipients: string[]; // format "33XXXXXXXXX" sans +
+  from: string; // format "0X........"
+  audioUrl: string;
+  campaignName?: string;
+  scheduledDate?: string; // "YYYY-MM-DD HH:MM:SS"
+  simulate?: boolean;
+}): Promise<BulkVoiceResult> {
+  const { login, apiKey, baseUrl } = getConfig();
 
-  const audioBase64 = Buffer.from(args.audioBuffer).toString("base64");
-
-  const payload = {
-    from: sender,
-    smsData: {
-      recipients: args.recipients.map((r) => ({ mobilePhone: r.phoneNumber })),
-      audioFileName: args.audioFilename,
-      audioFileContent: audioBase64
-    }
+  const body: Record<string, unknown> = {
+    to: args.recipients,
+    from: args.from,
+    type: "directdeposit",
+    url: args.audioUrl
   };
+  if (args.campaignName) body.campaignName = args.campaignName;
+  if (args.scheduledDate) body.date = args.scheduledDate;
+  if (args.simulate) body.simulate = 1;
 
-  const res = await fetch(`${baseUrl}/sendVMS`, {
+  const res = await fetch(`${baseUrl}/voice/send/bulk`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: authHeader(login, apiKey)
     },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(body)
   });
 
-  let raw: unknown = null;
-  const text = await res.text();
+  const raw = await res.text();
+  let data: BulkVoiceResponse | null = null;
   try {
-    raw = text ? JSON.parse(text) : null;
+    data = raw ? (JSON.parse(raw) as BulkVoiceResponse) : null;
   } catch {
-    raw = text;
+    data = null;
   }
 
-  return { ok: res.ok, status: res.status, raw };
+  return { ok: res.ok, status: res.status, data, raw };
+}
+
+export type AccountInfo = {
+  code: number;
+  description: string;
+  balance: number;
+  nbSms: number;
+  email: string;
+  company: string;
+};
+
+export async function getAccount(): Promise<AccountInfo | null> {
+  const { login, apiKey, baseUrl } = getConfig();
+  const res = await fetch(`${baseUrl}/account`, {
+    headers: { Authorization: authHeader(login, apiKey) }
+  });
+  if (!res.ok) return null;
+  return (await res.json()) as AccountInfo;
+}
+
+export function getDefaultSender(): string {
+  return process.env.ALLMYSMS_DEFAULT_SENDER || "";
+}
+
+/**
+ * Convertit un numéro émetteur saisi par l'utilisateur en format AllMySMS
+ * (national, ex "0123456789").
+ *
+ * Accepte : "+33123456789", "0033123456789", "33123456789", "0123456789",
+ * "01 23 45 67 89", etc.
+ *
+ * Refuse : mobiles (06/07) — interdit en envoi de masse (ARCEP).
+ */
+export function normalizeFrenchLandline(input: string): string | null {
+  if (!input) return null;
+  let s = input.trim().replace(/[\s().-]/g, "");
+  if (!s) return null;
+
+  if (s.startsWith("+33")) s = "0" + s.slice(3);
+  else if (s.startsWith("0033")) s = "0" + s.slice(4);
+  else if (s.startsWith("33") && s.length === 11) s = "0" + s.slice(2);
+
+  if (!/^0[1234589]\d{8}$/.test(s)) return null;
+  if (/^0[67]/.test(s)) return null; // mobile interdit pour MVR
+  return s;
+}
+
+/**
+ * Convertit un numéro destinataire E.164 ("+33612345678") en format
+ * AllMySMS ("33612345678", sans +).
+ */
+export function toAllMySMSRecipient(e164: string): string {
+  return e164.replace(/^\+/, "");
 }
